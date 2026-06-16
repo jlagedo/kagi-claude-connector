@@ -1,0 +1,9 @@
+# Copy to `.dev.vars` for local `wrangler dev`. NEVER commit the real file.
+# In production these are set with `wrangler secret put <NAME>` instead.
+
+# Your Kagi API key from https://kagi.com/settings/api  (Search API is closed
+# beta — request access from support@kagi.com if you don't have it yet).
+KAGI_API_KEY="your-kagi-api-key"
+
+# The password you'll type on the OAuth consent screen when adding the connector.
+LOGIN_PASSWORD="choose-a-long-random-password"

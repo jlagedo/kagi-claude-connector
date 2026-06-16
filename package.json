@@ -1,0 +1,27 @@
+{
+  "name": "kagi-claude-connector",
+  "version": "1.0.0",
+  "description": "Remote MCP server on Cloudflare Workers that exposes Kagi search/extract to Claude (web + mobile) behind self-contained OAuth.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "tail": "wrangler tail",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.8.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.16.0",
+    "hono": "^4.12.25",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.9",
+    "wrangler": "^4.20.0"
+  }
+}
