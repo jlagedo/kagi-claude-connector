@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single Cloudflare Worker that acts as a **remote MCP server**, exposing Kagi search/extract to the Claude apps (web + mobile) as a custom connector. Claude connects from Anthropic's cloud over OAuth; the Worker proxies tool calls to the Kagi v1 API using a Kagi key held as a Worker secret.
+A single Cloudflare Worker acting as a **remote MCP server**: it exposes Kagi search/extract to the Claude apps as a custom connector, proxying tool calls to the Kagi v1 API with a Kagi key held as a Worker secret. Claude connects from Anthropic's cloud over OAuth, implemented in-Worker.
 
 ```
 Claude (web/mobile) --OAuth 2.1--> this Worker --Authorization: Bot <key>--> https://kagi.com/api/v1
@@ -15,34 +15,28 @@ Claude (web/mobile) --OAuth 2.1--> this Worker --Authorization: Bot <key>--> htt
 ```bash
 npm test                       # vitest run — unit tests, no network (mocked fetch)
 npx vitest run test/kagi.test.ts -t "lens"   # single file / -t filters by test name
-npx tsc --noEmit               # type-check
+npx tsc --noEmit               # type-check — there is no separate lint step; this is the gate
 npx wrangler deploy --dry-run  # validate the bundle without deploying (no auth needed)
 npx wrangler dev               # local server; reads secrets from .dev.vars
-node scripts/smoke.mjs         # full local E2E: scripts the OAuth flow + a real kagi_search (dev server must be up)
+node scripts/smoke.mjs         # full E2E: OAuth flow + a real kagi_search (needs dev server up)
 npx wrangler types             # regenerate worker-configuration.d.ts — RERUN after editing wrangler.jsonc
 ```
 
-The Worker is served on the custom domain `kagi.lagedo.dev` (`routes` in `wrangler.jsonc`, `custom_domain: true` — DNS + cert auto-provisioned on deploy). Connector URL for Claude: `https://kagi.lagedo.dev/mcp`.
-
-There is no separate lint step; `tsc --noEmit` is the gate. The full local check is `npm test && npx tsc --noEmit && npx wrangler deploy --dry-run`.
-
-First-time deploy setup (one-time, requires a Cloudflare + Kagi account): create the KV namespace (`npx wrangler kv namespace create OAUTH_KV`) and paste its id into `wrangler.jsonc`, then `npx wrangler secret put KAGI_API_KEY` and `npx wrangler secret put LOGIN_PASSWORD`, then `npx wrangler deploy`. A connector must be **added on claude.ai** (web) before it appears in the mobile apps; mobile cannot add connectors.
+Full local check before pushing: `npm test && npx tsc --noEmit && npx wrangler deploy --dry-run`. First-time deploy (KV namespace + secrets) is documented in the README.
 
 ## Architecture
 
-Three source files, each a distinct layer:
+Three layers, one file each:
 
-- **`src/index.ts`** — the entrypoint. Wires `OAuthProvider` (from `@cloudflare/workers-oauth-provider`) around everything: it implements `/token` and `/register` (DCR) itself, routes `/sse` + `/mcp` to the MCP server, and delegates everything else (the `/authorize` UI) to `src/auth.ts`. `KagiMCP extends McpAgent` (a Durable Object) and registers the two tools (`kagi_search`, `kagi_extract`) whose handlers call into `src/kagi.ts`.
-- **`src/kagi.ts`** — the Kagi v1 API client. Pure request/response logic, no Worker/MCP types (it imports `Env` as a type only — that is why it is unit-testable in plain Node). The contract: `POST /search` with `format:"markdown"` returns markdown as the raw body; `POST /extract` with `format:"json"` returns `{data:[{markdown}]}`; auth is `Authorization: Bot <key>`. This request shape must match Kagi's API, so it is the file most worth testing.
-- **`src/auth.ts`** — a Hono app implementing only the OAuth consent screen (`/authorize` GET form + POST password check) plus a landing page. On a correct password it calls `env.OAUTH_PROVIDER.completeAuthorization(...)`, which mints the code Claude exchanges for a token.
-
-The MCP tool surface and request/response contract deliberately mirror the official Python server's v1 client (`kagisearch/kagimcp`, `rehan/v1-api` branch, `src/kagimcp/server.py`) — consult it when changing tool params or the Kagi request body. Note our search tool is named `kagi_search`; the official one is `kagi_search_fetch` (both wrap the same `POST /search`).
+- **`src/index.ts`** — entrypoint. Wraps everything in `OAuthProvider` (which implements `/token` + `/register`/DCR and protects `/mcp` + `/sse`) and delegates the `/authorize` UI to `src/auth.ts`. `KagiMCP extends McpAgent` (a Durable Object) registers the two tools.
+- **`src/kagi.ts`** — Kagi v1 client. No Worker/MCP types (imports `Env` as a type only), so it is unit-testable in plain Node. Contract: `POST /search` with `format:"markdown"` → markdown body; `POST /extract` with `format:"json"` → `{data:[{markdown}]}`; auth `Authorization: Bot <key>`. Mirrors the official server (`kagisearch/kagimcp`, `rehan/v1-api` branch) — consult it when changing the request body.
+- **`src/auth.ts`** — Hono app for the `/authorize` consent screen (password gate). On success it calls `completeAuthorization(...)` to mint the OAuth code.
 
 ## Non-obvious constraints (read before editing)
 
-- **`KAGI_AUTH_SCHEME` (a var in `wrangler.jsonc`) defaults to `Bot`** — the scheme Kagi's docs use. It exists only as an escape hatch: flip it to `Bearer` if a key ever 401s under `Bot`. Don't change the default.
-- **The `as any` casts in `index.ts` on the `apiHandlers`/`defaultHandler` are required and intentional.** `agents`, `workers-oauth-provider`, and the wrangler-generated runtime types each pull a slightly different `@cloudflare/workers-types` (the `getSetCookie`-on-`Headers` diff), so the structurally-identical handlers don't unify by name. The casts are type-only; runtime is correct. Do not try to "fix" them by changing handler signatures.
-- **`agents` (≥0.16) requires `zod` v4 as a peer; the MCP SDK supports v3 or v4.** Keep `zod` on v4. Use zod-4 idioms: top-level `z.url()` (not `z.string().url()`).
-- **The Kagi key stays server-side.** It lives in `env.KAGI_API_KEY` (a secret), never in OAuth `props` and never sent to Claude. Keep it that way — the OAuth password gate exists so a stranger who finds the URL can't spend Kagi credits.
-- **`Env` extends the generated `Cloudflare.Env`** (`index.ts`) and only declares the secrets, because `wrangler types` already covers bindings + vars but not `wrangler secret` values.
-- Use the MCP SDK's `server.registerTool(name, {title, description, inputSchema}, cb)` form (not the legacy `server.tool()`). Tool handlers may throw — the SDK converts thrown errors into an `isError` result, so no per-tool try/catch is needed.
+- **The `as any` casts in `index.ts` on `apiHandlers`/`defaultHandler` are intentional.** `agents`, `workers-oauth-provider`, and the generated runtime types each pull a slightly different `@cloudflare/workers-types`, so the structurally-identical handlers don't unify by name. The casts are type-only; runtime is correct. Don't "fix" them.
+- **Keep `zod` on v4.** `agents` (≥0.16) requires it as a peer; the MCP SDK accepts v3 or v4. Use zod-4 idioms: top-level `z.url()`, not `z.string().url()`.
+- **Use `server.registerTool(name, {title, description, inputSchema}, cb)`** (not the legacy `server.tool()`). Handlers may throw — the SDK converts thrown errors into an `isError` result, so no per-tool try/catch.
+- **The Kagi key stays server-side** — `env.KAGI_API_KEY` (a secret), never in OAuth `props`, never sent to Claude.
+- **`KAGI_AUTH_SCHEME` (var in `wrangler.jsonc`) defaults to `Bot`** — an escape hatch only; flip to `Bearer` if a key 401s. Don't change the default.
+- **`Env` (in `index.ts`) extends the generated `Cloudflare.Env`** and declares only the secrets — `wrangler types` covers bindings + vars but not `wrangler secret` values.
