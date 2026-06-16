@@ -42,13 +42,14 @@ npx wrangler secret put LOGIN_PASSWORD     # the password you'll type when addin
 npx wrangler deploy
 ```
 
-`wrangler deploy` prints your URL, e.g. `https://kagi-claude-connector.<you>.workers.dev`.
+This Worker is served on a custom domain (`kagi.lagedo.dev`, configured via `routes` in
+`wrangler.jsonc`); `wrangler deploy` provisions the DNS record + TLS cert automatically. Without a
+custom domain it would be `https://kagi-claude-connector.<you>.workers.dev`.
 
 ## Add it to Claude
 
 1. On **claude.ai** → **Settings → Connectors → Add custom connector**.
-2. URL: `https://kagi-claude-connector.<you>.workers.dev/sse`
-   (if Claude rejects `/sse`, try `/mcp` — both are exposed).
+2. URL: `https://kagi.lagedo.dev/mcp` (Streamable HTTP). `/sse` is also exposed for older clients.
 3. Complete the login — enter your `LOGIN_PASSWORD` on the consent screen.
 4. Open Claude on your phone. `kagi_search` / `kagi_extract` are now available in chats.
 
@@ -59,6 +60,7 @@ cp .dev.vars.example .dev.vars   # fill in KAGI_API_KEY + LOGIN_PASSWORD
 npx wrangler dev
 
 npm test                         # unit tests for the Kagi request/response contract (no network)
+node scripts/smoke.mjs           # full E2E: OAuth flow + real kagi_search, against the dev server
 ```
 
 ## Notes

@@ -18,8 +18,11 @@ npx vitest run test/kagi.test.ts -t "lens"   # single file / -t filters by test 
 npx tsc --noEmit               # type-check
 npx wrangler deploy --dry-run  # validate the bundle without deploying (no auth needed)
 npx wrangler dev               # local server; reads secrets from .dev.vars
+node scripts/smoke.mjs         # full local E2E: scripts the OAuth flow + a real kagi_search (dev server must be up)
 npx wrangler types             # regenerate worker-configuration.d.ts — RERUN after editing wrangler.jsonc
 ```
+
+The Worker is served on the custom domain `kagi.lagedo.dev` (`routes` in `wrangler.jsonc`, `custom_domain: true` — DNS + cert auto-provisioned on deploy). Connector URL for Claude: `https://kagi.lagedo.dev/mcp`.
 
 There is no separate lint step; `tsc --noEmit` is the gate. The full local check is `npm test && npx tsc --noEmit && npx wrangler deploy --dry-run`.
 
