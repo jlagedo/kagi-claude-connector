@@ -1,36 +1,57 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "kagi-claude-connector",
-  "main": "src/index.ts",
-  "compatibility_date": "2025-06-01",
-  "compatibility_flags": ["nodejs_compat"],
-
-  // Serve the Worker on a custom hostname (zone lagedo.dev must be on this
-  // account). `custom_domain: true` auto-provisions the DNS record + TLS cert
-  // on deploy — do not create the DNS record manually. The OAuth issuer is
-  // derived from this host at runtime, so no code change is needed.
-  // Connector URL for Claude: https://kagi.lagedo.dev/mcp
-  "routes": [{ "pattern": "kagi.lagedo.dev", "custom_domain": true }],
-
-  // McpAgent is a Durable Object. The binding name "MCP_OBJECT" is what the
-  // `agents` library looks for; the class lives in src/index.ts.
-  "durable_objects": {
-    "bindings": [{ "name": "MCP_OBJECT", "class_name": "KagiMCP" }]
-  },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KagiMCP"] }],
-
-  // workers-oauth-provider stores token hashes, encrypted grant props and
-  // client registrations here. Create it with:
-  //   npx wrangler kv namespace create OAUTH_KV
-  // then paste the returned id below.
-  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_ID" }],
-
-  // Non-secret defaults. Secrets (KAGI_API_KEY, LOGIN_PASSWORD) are set with
-  // `wrangler secret put`, never committed.
-  "vars": {
-    "KAGI_AUTH_SCHEME": "Bot",
-    "KAGI_API_BASE": "https://kagi.com/api/v1"
-  },
-
-  "observability": { "enabled": true }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "kagi-claude-connector",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-06-01",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	// Serve the Worker on a custom hostname (zone lagedo.dev must be on this
+	// account). `custom_domain: true` auto-provisions the DNS record + TLS cert
+	// on deploy — do not create the DNS record manually. The OAuth issuer is
+	// derived from this host at runtime, so no code change is needed.
+	// Connector URL for Claude: https://kagi.lagedo.dev/mcp
+	"routes": [
+		{
+			"pattern": "kagi.lagedo.dev",
+			"custom_domain": true
+		}
+	],
+	// McpAgent is a Durable Object. The binding name "MCP_OBJECT" is what the
+	// `agents` library looks for; the class lives in src/index.ts.
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "MCP_OBJECT",
+				"class_name": "KagiMCP"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"KagiMCP"
+			]
+		}
+	],
+	// workers-oauth-provider stores token hashes, encrypted grant props and
+	// client registrations here. `remote: true` makes `wrangler dev` use this
+	// real namespace too (rather than a local simulation).
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			"id": "bdf5bb7868de4f95a7c1052817d810d8",
+			"remote": true
+		}
+	],
+	// Non-secret defaults. Secrets (KAGI_API_KEY, LOGIN_PASSWORD) are set with
+	// `wrangler secret put`, never committed.
+	"vars": {
+		"KAGI_AUTH_SCHEME": "Bot",
+		"KAGI_API_BASE": "https://kagi.com/api/v1"
+	},
+	"observability": {
+		"enabled": true
+	}
 }
