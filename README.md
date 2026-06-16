@@ -1,45 +1,47 @@
 # Kagi → Claude connector
 
-A remote [MCP](https://modelcontextprotocol.io) server running on a **Cloudflare Worker** that
-gives the **Claude mobile and web apps** access to [Kagi](https://kagi.com) search via your Kagi
-API key. It exposes two tools — `kagi_search` and `kagi_extract` — mirroring the official
-[`kagisearch/kagimcp`](https://github.com/kagisearch/kagimcp) server, but packaged as a public
-HTTPS endpoint with **self-contained OAuth** so it works as a Claude custom connector.
+A remote [MCP](https://modelcontextprotocol.io) server on a **Cloudflare Worker** that exposes
+[Kagi](https://kagi.com) search to Claude as a custom connector. It registers two tools —
+`kagi_search` and `kagi_extract` — and wraps them in self-contained OAuth 2.1 so Claude can connect
+to it directly. The tool surface mirrors the official
+[`kagisearch/kagimcp`](https://github.com/kagisearch/kagimcp) server.
 
 ```
 Claude (web/mobile) ──OAuth 2.1──▶ Cloudflare Worker ──Authorization: Bot <key>──▶ Kagi v1 API
 ```
 
-## Why this shape
+Two technical constraints drive the design:
 
-- Claude connects to custom connectors **from Anthropic's cloud**, so the server must be on the
-  public internet. A Worker gives you that for free.
-- The Claude **mobile** apps can *use* connectors but can't *add* them — you add it once on
-  [claude.ai](https://claude.ai) and it then appears on iOS/Android.
-- Your Kagi key stays a **Worker secret**; it is never sent to Claude. Access is gated by a single
-  password via OAuth, so a stranger who finds the URL can't spend your Kagi credits.
+- Claude reaches a custom connector **from Anthropic's cloud**, so the server must be a public HTTPS
+  endpoint — hence a Worker, not a local process.
+- The Kagi key is a **Worker secret**; it never leaves the server or reaches Claude. The `/authorize`
+  screen gates access behind a single password so the public URL can't be used by a stranger.
 
-## How it works
+## Architecture
 
 | File | Role |
 | --- | --- |
-| `src/index.ts` | Wires `OAuthProvider` around the Worker and registers the `KagiMCP` agent (the two tools). |
-| `src/kagi.ts` | Thin Kagi v1 API client (`POST /search` → markdown, `POST /extract` → JSON envelope). |
-| `src/auth.ts` | The `/authorize` consent screen — a single-password gate that completes the OAuth grant. |
-| `test/kagi.test.ts` | Unit tests for the Kagi request/response contract (no network). |
-| `scripts/smoke.mjs` | Full end-to-end check: scripts the OAuth flow + a real `kagi_search`. |
+| `src/index.ts` | Entrypoint. Wraps everything in `OAuthProvider`, registers the `KagiMCP` Durable Object and its two tools. |
+| `src/kagi.ts` | Kagi v1 API client. Pure request/response logic, no Worker/MCP types (unit-testable in plain Node). |
+| `src/auth.ts` | Hono app for the `/authorize` consent screen — a single-password gate that completes the OAuth grant. |
+| `test/kagi.test.ts` | Unit tests for the Kagi request/response contract (mocked fetch, no network). |
+| `scripts/smoke.mjs` | End-to-end check: drives the OAuth flow, then calls `kagi_search` over MCP. |
 
 `OAuthProvider` implements `/token` and `/register` (Dynamic Client Registration) itself and
-protects `/sse` + `/mcp`; everything else (the login UI) is handled by `src/auth.ts`. The Kagi key
-lives in `env.KAGI_API_KEY` (a Worker secret) and never reaches Claude.
+protects `/mcp` (Streamable HTTP) + `/sse` (legacy); the `/authorize` UI is delegated to `src/auth.ts`.
+
+### Kagi v1 contract
+
+- `POST /search` with `format: "markdown"` → response body is markdown.
+- `POST /extract` with `format: "json"` → `{ data: [{ markdown }], meta, errors }`.
+- Auth header is `Authorization: Bot <key>` (override with `KAGI_AUTH_SCHEME`).
 
 ## Prerequisites
 
-- A **Cloudflare account**. `wrangler` comes in via `npm install` (no global install needed).
-- A **Kagi Search API** key from [kagi.com/settings/api](https://kagi.com/settings/api). The Search
-  API is in closed beta — email `support@kagi.com` for access. Pricing is ~$0.025/search.
+- A **Cloudflare account** (`wrangler` is a dev dependency — no global install).
+- A **Kagi API key** with v1 Search + Extract access, from the [API portal](https://kagi.com/settings/api).
 - **Node 18+**.
-- *(Optional)* a domain on Cloudflare if you want a custom hostname instead of `*.workers.dev`.
+- *(Optional)* a domain on Cloudflare for a custom hostname instead of `*.workers.dev`.
 
 ## Setup
 
@@ -64,31 +66,27 @@ Copy the printed `id` into `wrangler.jsonc` under `kv_namespaces`:
 ```
 
 > If you let wrangler "add it on your behalf", it **appends** a second `OAUTH_KV` binding instead of
-> replacing the placeholder — delete the old placeholder entry so only one binding remains.
-> A KV namespace id is an identifier, not a secret, so it is safe to commit.
+> replacing the placeholder — keep only one. A KV namespace id is an identifier, not a secret.
 
 ### 3. Choose the hostname
 
-By default the Worker deploys to `https://kagi-claude-connector.<your-subdomain>.workers.dev`.
+By default the Worker deploys to `https://kagi-claude-connector.<subdomain>.workers.dev`.
 
-To serve it on **your own domain** (the zone must be on the same Cloudflare account), set a custom
-domain route in `wrangler.jsonc` — `custom_domain: true` auto-provisions the DNS record + TLS cert
-on deploy (do **not** create the DNS record manually):
+For a custom hostname (the zone must be on the same Cloudflare account), set a route in
+`wrangler.jsonc` — `custom_domain: true` auto-provisions the DNS record + TLS cert on deploy (do
+**not** create the DNS record manually):
 
 ```jsonc
 "routes": [{ "pattern": "kagi.yourdomain.com", "custom_domain": true }]
 ```
 
-No code change is needed — the OAuth issuer is derived from the request host at runtime. If you
-don't want a custom domain, remove the `routes` block and use the `workers.dev` URL.
+No code change is needed — the OAuth issuer is derived from the request host at runtime.
 
 ### 4. Set secrets
 
-You'll be prompted to paste each value; they are stored encrypted and never committed.
-
 ```bash
-npx wrangler secret put KAGI_API_KEY      # your Kagi Search API key
-npx wrangler secret put LOGIN_PASSWORD    # the password you'll type when connecting (pick a long random one)
+npx wrangler secret put KAGI_API_KEY      # Kagi v1 API key
+npx wrangler secret put LOGIN_PASSWORD    # password typed on the consent screen
 ```
 
 ### 5. Deploy
@@ -97,65 +95,49 @@ npx wrangler secret put LOGIN_PASSWORD    # the password you'll type when connec
 npx wrangler deploy
 ```
 
-First deploy provisions the custom domain + cert, which can take ~a minute to go active. Confirm the
-secrets are set with `npx wrangler secret list`.
+A first deploy with a custom domain provisions the cert, which can take ~a minute. Confirm secrets
+with `npx wrangler secret list`.
 
 ## Add it to Claude
 
-You must add the connector on **claude.ai (web)** or the desktop app — mobile can't add connectors,
-but inherits this one automatically once added.
+Add the connector on **claude.ai (web)** or **Claude Desktop**; the mobile apps then use it
+automatically (the add-connector flow is web/desktop only).
 
-1. **claude.ai** → **Settings → Connectors** → scroll down → **Add custom connector**.
-2. **Name:** `Kagi`. **URL:** `https://kagi.yourdomain.com/mcp` (Streamable HTTP; `/sse` is also
-   exposed for older clients).
-3. Leave **OAuth Client ID / Secret blank** — the server supports Dynamic Client Registration, so
-   Claude registers itself.
-4. Click **Add** → you're redirected to the login screen → enter your **`LOGIN_PASSWORD`** →
-   **Authorize**.
-5. The connector shows **Connected** with tools `kagi_search` and `kagi_extract`. Enable it in a
-   chat via the composer's connectors menu, then ask anything searchy.
-6. Open Claude on your **phone** (same account) — the tools are already there.
-
-> Custom connectors require a Pro/Max/Team/Enterprise plan (Free has limits). If you don't see
-> "Add custom connector", it's a plan/rollout gate on the account.
-
-## Verify
-
-```bash
-npx wrangler secret list                                  # confirm KAGI_API_KEY + LOGIN_PASSWORD are set
-BASE=https://kagi.yourdomain.com node scripts/smoke.mjs   # full OAuth flow + a real kagi_search
-```
-
-`smoke.mjs` reads `LOGIN_PASSWORD` from `.dev.vars`, so set the same password locally as in the
-secret. A successful run prints `✓ OAuth flow OK`, the tool list, and live Kagi results.
+1. **Settings → Connectors → Add custom connector**.
+2. **URL:** `https://kagi.yourdomain.com/mcp` (Streamable HTTP; `/sse` is also exposed).
+3. Leave **OAuth Client ID / Secret blank** — the server supports DCR, so Claude self-registers.
+4. **Add** → redirected to the login screen → enter `LOGIN_PASSWORD` → **Authorize**.
+5. The connector shows **Connected** with `kagi_search` and `kagi_extract`.
 
 ## Local development
 
 ```bash
-cp .dev.vars.example .dev.vars   # fill in KAGI_API_KEY + LOGIN_PASSWORD
+cp .dev.vars.example .dev.vars   # set KAGI_API_KEY + LOGIN_PASSWORD
 npx wrangler dev                 # local server at http://localhost:8787
 
 npm test                         # unit tests (no network)
-node scripts/smoke.mjs           # full E2E against the local dev server
+node scripts/smoke.mjs           # E2E against the local dev server
 ```
+
+`scripts/smoke.mjs` reads `LOGIN_PASSWORD` from `.dev.vars`. Run it against prod with
+`BASE=https://kagi.yourdomain.com node scripts/smoke.mjs`.
 
 ## Configuration reference
 
 | Name | Where | Purpose |
 | --- | --- | --- |
-| `KAGI_API_KEY` | secret | Kagi Search API key, sent to Kagi as `Authorization: Bot <key>`. |
+| `KAGI_API_KEY` | secret | Kagi v1 API key, sent as `Authorization: Bot <key>`. |
 | `LOGIN_PASSWORD` | secret | Password for the OAuth consent screen. |
-| `KAGI_AUTH_SCHEME` | var (`wrangler.jsonc`) | Auth header scheme; defaults to `Bot`. Switch to `Bearer` only if Kagi returns 401. |
-| `KAGI_API_BASE` | var (`wrangler.jsonc`) | Kagi API base URL (`https://kagi.com/api/v1`). |
+| `KAGI_AUTH_SCHEME` | var | Auth header scheme; defaults to `Bot`. Set to `Bearer` only if Kagi returns 401. |
+| `KAGI_API_BASE` | var | Kagi API base URL (`https://kagi.com/api/v1`). |
 | `OAUTH_KV` | KV binding | OAuth token/grant/client storage. |
 | `MCP_OBJECT` | Durable Object | Backs the `KagiMCP` agent; required by the `agents` library. |
 
-## Notes / troubleshooting
+## Troubleshooting
 
-- **Connect fails:** confirm the URL is exactly `…/mcp`; if Claude rejects it, try `…/sse`.
+- **Connect fails:** confirm the URL ends in `/mcp`; if Claude rejects it, try `/sse`.
 - **Kagi 401:** set `KAGI_AUTH_SCHEME` to `Bearer` in `wrangler.jsonc` and redeploy.
-- **Revoke access:** remove the connector in Claude, and/or rotate with `wrangler secret put LOGIN_PASSWORD`.
-- **Tighter access:** swap the shared-password screen in `src/auth.ts` for GitHub/Google OAuth
-  (see Cloudflare's `remote-mcp-github-oauth` template) if you want identity-based access.
-- Package versions track fast-moving libraries (`agents`, `@modelcontextprotocol/sdk`,
-  `@cloudflare/workers-oauth-provider`); run `npm update` and `npx wrangler types` if the build complains.
+- **Revoke access:** remove the connector in Claude, and/or rotate `LOGIN_PASSWORD`.
+- **Identity-based access:** swap the shared-password screen in `src/auth.ts` for GitHub/Google
+  OAuth (see Cloudflare's `remote-mcp-github-oauth` template).
+- **Build complains after a dep bump:** run `npm update` and `npx wrangler types`.
